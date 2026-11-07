@@ -1,4 +1,5 @@
 import csv
+import sys
 from pathlib import Path
 
 import cv2
@@ -11,7 +12,7 @@ TRAINING_DATA_DIR = (
     BASE_DIR / "training-data" / "asl_alphabet_train" / "asl_alphabet_train"
 )
 MODEL_PATH = BASE_DIR / "hand_landmarker.task"
-OUTPUT_PATH = BASE_DIR / "hand_landmark_dataset.csv"
+OUTPUT_PATH = BASE_DIR / "output" / "hand_landmark_dataset.csv"
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 LANDMARK_COLUMNS = [
     f"landmark_{index}_{coordinate}"
@@ -32,6 +33,17 @@ def compile_dataset() -> None:
     if not class_directories:
         raise FileNotFoundError(f"No class directories found in {TRAINING_DATA_DIR}")
 
+    total_images = sum(
+        sum(
+            1
+            for path in class_directory.iterdir()
+            if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+        )
+        for class_directory in class_directories
+    )
+
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
     options = vision.HandLandmarkerOptions(
         base_options=python.BaseOptions(model_asset_path=str(MODEL_PATH)),
         running_mode=vision.RunningMode.IMAGE,
@@ -44,41 +56,66 @@ def compile_dataset() -> None:
     rows_written = 0
     unreadable_images = 0
     images_without_hands = 0
+    progress_width = 30
+
+    def update_progress() -> None:
+        progress = images_processed / total_images
+        filled_width = int(progress * progress_width)
+        bar = "=" * filled_width + " " * (progress_width - filled_width)
+        sys.stderr.write(
+            f"\rCompiling dataset: [{bar}] {images_processed}/{total_images} "
+            f"({progress:.0%})"
+        )
+        sys.stderr.flush()
 
     try:
         with OUTPUT_PATH.open("w", newline="", encoding="utf-8") as csv_file:
             writer = csv.writer(csv_file)
             writer.writerow(["label", *LANDMARK_COLUMNS])
 
-            for class_directory in class_directories:
-                image_paths = sorted(
-                    path
-                    for path in class_directory.iterdir()
-                    if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
-                )
-                for image_path in image_paths:
-                    images_processed += 1
-                    image = cv2.imread(str(image_path))
-                    if image is None:
-                        unreadable_images += 1
-                        continue
+            if total_images:
+                update_progress()
 
-                    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                    result = detector.detect(
-                        mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
+            try:
+                for class_directory in class_directories:
+                    image_paths = sorted(
+                        path
+                        for path in class_directory.iterdir()
+                        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
                     )
-                    if not result.hand_landmarks:
-                        images_without_hands += 1
-                        continue
+                    for image_path in image_paths:
+                        image = cv2.imread(str(image_path))
+                        if image is None:
+                            unreadable_images += 1
+                        else:
+                            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                            result = detector.detect(
+                                mp.Image(
+                                    image_format=mp.ImageFormat.SRGB, data=rgb_image
+                                )
+                            )
+                            if not result.hand_landmarks:
+                                images_without_hands += 1
+                            else:
+                                landmarks = result.hand_landmarks[0]
+                                coordinates = [
+                                    value
+                                    for landmark in landmarks
+                                    for value in (landmark.x, landmark.y, landmark.z)
+                                ]
+                                writer.writerow([class_directory.name, *coordinates])
+                                rows_written += 1
 
-                    landmarks = result.hand_landmarks[0]
-                    coordinates = [
-                        value
-                        for landmark in landmarks
-                        for value in (landmark.x, landmark.y, landmark.z)
-                    ]
-                    writer.writerow([class_directory.name, *coordinates])
-                    rows_written += 1
+                        images_processed += 1
+                        if (
+                            images_processed % max((total_images + 99) // 100, 1) == 0
+                            or images_processed == total_images
+                        ):
+                            update_progress()
+            finally:
+                if total_images:
+                    sys.stderr.write("\n")
+                    sys.stderr.flush()
     finally:
         detector.close()
 
