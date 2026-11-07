@@ -1,0 +1,4 @@
+/training-data
+.DS_Store
+hand_landmark_dataset.csv
+hand_landmark_model.joblib
